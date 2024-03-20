@@ -123,7 +123,7 @@ void send_then_print_response(struct client_state *client, char *command) {
     printf("%s\n", buf);
 }
 
-void send_data_port(struct client_state *client) {
+int send_data_port(struct client_state *client) {
     static char buf[COMMAND_STR_MAX];
 
     // Add command to buffer
@@ -146,10 +146,28 @@ void send_data_port(struct client_state *client) {
         exit(EXIT_FAILURE);
     }
     
-    // TODO: Ensure server sent proper response. If not, have to stop somehow
-    // Can be done by making the function return 1 (true) if the server sent an OK response
-    // and 0 (false) otherwise, and checking the return value in the places where
-    // this function is used
+    // Wait for response from server
+    char response[COMMAND_STR_MAX];
+    int bytes_received = recv(client->control_sockfd, response, COMMAND_STR_MAX - 1, 0);
+    if (bytes_received == -1) {
+        perror("recv");
+        exit(EXIT_FAILURE);
+    } else if (bytes_received == 0) {
+        // Server closed the connection unexpectedly
+        fprintf(stderr, "Server closed the connection unexpectedly.\n");
+        exit(EXIT_FAILURE);
+    } else {
+        response[bytes_received] = '\0';
+        // Check if server sent proper response
+        if (check_prefix(response, "200")) {
+            // Server sent OK response
+            return 1;
+        } else {
+            // Server sent an error response
+            fprintf(stderr, "Server response: %s\n", response);
+            return 0;
+        }
+    }
 }
 
 void initiate_data_transfer(struct client_state *client) {
