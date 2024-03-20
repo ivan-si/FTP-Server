@@ -208,28 +208,78 @@ void handle_command_password(struct server_state *server, struct server_client_s
     }
 }
 
-void handle_command_port(struct server_state *server, struct server_client_state *client, char *command) {
-    
-}
-
-void handle_command_store(struct server_state *server, struct server_client_state *client, char *command) {
-
-}
-
-void handle_command_retrieve(struct server_state *server, struct server_client_state *client, char *command) {
-
-}
-
 void handle_command_list(struct server_state *server, struct server_client_state *client) {
-    
+    // Open the current directory
+    DIR *dir = opendir(client->current_path);
+    if (dir == NULL) {
+        perror("opendir");
+        send_response(client->sockfd, "550 Failed to open directory.\n");
+        return;
+    }
+
+    // Read directory entries
+    struct dirent *entry;
+    char list_response[COMMAND_STR_MAX] = "";
+    while ((entry = readdir(dir)) != NULL) {
+        strcat(list_response, entry->d_name);
+        strcat(list_response, "\n");
+    }
+
+    // Close directory
+    closedir(dir);
+
+    // Send the list response to the client
+    if (send_response(client->sockfd, "150 Here comes the directory listing.\n") == -1) {
+        perror("send_response");
+        return;
+    }
+
+    // Accept the data connection from the client
+    int data_sockfd = accept_data_connection(client);
+    if (data_sockfd == -1) {
+        perror("accept_data_connection");
+        return;
+    }
+
+    // Send the directory listing data to the client
+    if (send_data(data_sockfd, list_response, strlen(list_response)) == -1) {
+        perror("send_data");
+        close(data_sockfd);
+        return;
+    }
+
+    // Close the data connection
+    close(data_sockfd);
+
+    // Notify client that the data transfer is complete
+    if (send_response(client->sockfd, "226 Directory send OK.\n") == -1) {
+        perror("send_response");
+        return;
+    }
 }
 
 void handle_command_change_directory(struct server_state *server, struct server_client_state *client, char *command) {
-
 }
 
 void handle_command_print_directory(struct server_state *server, struct server_client_state *client) {
+    if (client->state != SERVER_CLIENT_STATE_AUTHENTICATED) {
+        // Not logged in, invalid sequence of commands
+        send_to_client(client, "503 Bad sequence of commands.");
+        return;
+    }
 
+    // Get the current directory path
+    char current_directory[PATH_MAX];
+    if (getcwd(current_directory, sizeof(current_directory)) == NULL) {
+        perror("getcwd");
+        send_to_client(client, "451 Requested action aborted: local error in processing.");
+        return;
+    }
+
+    // Responding with current directory path
+    char response[COMMAND_STR_MAX];
+    snprintf(response, sizeof(response), "257 \"%s\" ", current_directory);
+    send_to_client(client, response);
 }
 
 void handle_command_quit(struct server_state *server, struct server_client_state *client) {
@@ -293,11 +343,36 @@ void send_to_client(struct server_client_state *client, char *message) {
 void read_auth_data(struct server_state *server) {
     server->users_auth_data = NULL;
 
-    // TODO: Read from users.txt, a file which should be located at server->base_path
-    // Checking if the file exists is outside of the scope of this project
-    // Store results in server->users_auth_data in the form of a linked list
+    // Open the users.txt file for reading
+    char users_txt_path[PATH_MAX];
+    snprintf(users_txt_path, sizeof(users_txt_path), "%s/users.txt", server->base_path);
+    FILE *file = fopen(users_txt_path, "r");
+    if (file == NULL) {
+        perror("fopen");
+        exit(EXIT_FAILURE);
+    }
 
-    add_auth_data(server, "abc", "def");
+    // Read each line from the file and parse username and password
+    char line[AUTH_STR_MAX * 2]; // Max length for username and password in a line
+    while (fgets(line, sizeof(line), file) != NULL) {
+        // Remove trailing newline character
+        line[strcspn(line, "\n")] = '\0';
+
+        // Tokenize the line to extract username and password
+        char *username = strtok(line, " ");
+        char *password = strtok(NULL, " ");
+
+        // Skip empty lines
+        if (username == NULL || password == NULL) {
+            continue;
+        }
+
+        // Add the authentication data to the linked list
+        add_auth_data(server, username, password);
+    }
+
+    // Close the file
+    fclose(file);
 
     // For each user, create their storage directory if it is missing
     for (struct user_auth_data *node = server->users_auth_data; node != NULL; node = node->next) {
