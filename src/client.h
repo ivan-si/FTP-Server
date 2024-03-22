@@ -20,15 +20,11 @@ struct client_state {
     char current_path[PATH_MAX];
 };
 
-void connect_to_server(struct client_state *client);
-
 void get_commands(struct client_state *client);
-
-void send_then_print_response(struct client_state *client, char *command);
 
 void initiate_data_transfer(struct client_state *client);
 
-void send_data_port(struct client_state *client);
+int send_data_port(struct client_state *client);
 
 void initiate_data_transfer(struct client_state *client);
 

@@ -2,6 +2,7 @@
 #define SERVER_H_
 
 #include <limits.h>
+#include <netinet/in.h>
 #include <sys/select.h>
 
 #define AUTH_STR_MAX 128
@@ -30,7 +31,8 @@ struct server_client_state {
     int state;
     struct user_auth_data *auth_data;
     char current_path[PATH_MAX];
-    
+    int has_data_addr;
+    struct sockaddr_in data_addr;
     struct server_client_state *next;
 };
 
@@ -62,7 +64,18 @@ void remove_client(struct server_state *server, struct server_client_state *clie
 
 struct server_client_state* find_client_by_sockfd(struct server_state *server, int sockfd);
 
-void send_to_client(struct server_client_state *client, char *message);
+/**
+ * @brief Read the auth data *usernames and passwords from the users.txt file and store them
+ */
+void read_auth_data(struct server_state *server);
+
+void add_auth_data(struct server_state *server, char *username, char *password);
+
+struct user_auth_data* find_auth_data_by_username(struct server_state *server, char *username);
+
+void initialize_user_storage_directory(struct server_state *server, struct user_auth_data *auth_data);
+
+void initialize_current_path(struct server_state *server, struct server_client_state *client);
 
 /**
  * @brief Handle an incoming client command.
@@ -86,16 +99,5 @@ void handle_command_change_directory(struct server_state *server, struct server_
 void handle_command_print_directory(struct server_state *server, struct server_client_state *client);
 
 void handle_command_quit(struct server_state *server, struct server_client_state *client);
-
-/**
- * @brief Read the auth data *usernames and passwords from the users.txt file and store them
- */
-void read_auth_data(struct server_state *server);
-
-void add_auth_data(struct server_state *server, char *username, char *password);
-
-struct user_auth_data* find_auth_data_by_username(struct server_state *server, char *username);
-
-void initialize_user_storage_directory(struct server_state *server, struct user_auth_data *auth_data);
 
 #endif

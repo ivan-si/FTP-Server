@@ -116,3 +116,63 @@ void listen_port(int port, int *sockfd_result, int *port_result) {
         *port_result = ntohs(addr.sin_port);
     }
 }
+
+void connect_to_address_and_port(int address, int port, int *result_sockfd) {
+    // Get socket file descriptor
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd == -1) {
+        perror("socket");
+        exit(EXIT_FAILURE);
+    }
+
+    // Set socket options to avoid bind() errors
+    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int)) == -1) {
+        perror("setsockopt");
+        exit(EXIT_FAILURE);
+    }
+
+    // Specify address and port to connect socket to
+    struct sockaddr_in target_addr;
+    memset(&target_addr, 0, sizeof(target_addr));
+    target_addr.sin_family = AF_INET; // IPV4
+    target_addr.sin_addr.s_addr = address;
+    target_addr.sin_port = htons(port);
+
+    // Connect socket to server
+    if (connect(sockfd, (struct sockaddr *) &target_addr, sizeof(target_addr)) == -1) {
+        perror("connect");
+        exit(EXIT_FAILURE);
+    }
+
+    *result_sockfd = sockfd;
+}
+
+void send_message(int sockfd, const char *message) {
+    if (send(sockfd, message, strlen(message), 0) == -1) {
+        perror("send");
+        exit(EXIT_FAILURE);
+    }
+}
+
+void send_then_print_response(int sockfd, const char *message) {
+    static char buf[COMMAND_STR_MAX];
+
+    // Send to server
+    printf("Sending: %s\n", message);
+    send_message(sockfd, message);
+
+    // Receive response
+    // TODO: Program often blocks here because the server isn't sending a response for most commands.
+    // Once all handle() functions in the server are implemented, it shouldn't hang.
+    int bytes_received = (int)recv(sockfd, buf, COMMAND_STR_MAX - 1, 0);
+    if (bytes_received == -1) {
+        perror("recv");
+        exit(EXIT_FAILURE);
+    }
+
+    // Null-terminate the response
+    buf[bytes_received] = '\0';
+    
+    // Print the response
+    printf("%s\n", buf);
+}
