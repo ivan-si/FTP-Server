@@ -6,6 +6,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 
 const char *COMMAND_LIST_CLIENT = "!LIST";
@@ -18,9 +19,19 @@ int main() {
     client.data_listen_sockfd = -1;
     client.data_sockfd = -1;
     client.data_port = -1;
-    client.state = CLIENT_STATE_CONTROL;
 
-    connect_to_address_and_port(inet_addr("127.0.0.1"), SERVER_CONTROL_PORT, &(client.control_sockfd));
+    // Connect to the server
+    struct sockaddr_in server_addr;
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin_family = AF_INET; // IPV4
+    server_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    server_addr.sin_port = htons(SERVER_CONTROL_PORT);
+
+    connect_to_addr(server_addr, &(client.control_sockfd));
+    
+    if (!receive_response_then_check_first_token_then_print_response_if_ok(client.control_sockfd, "220")) {
+        exit(EXIT_FAILURE);
+    }
 
     get_commands(&client);
 
@@ -36,37 +47,38 @@ void get_commands(struct client_state *client) {
         // Get a line from stdin
         fgets(command, sizeof(command), stdin);
         
-        int command_length = strlen(command);
-        printf("Command length: %d\n", command_length);
-        if (command_length <= 1) {
+        int command_length = strcspn(command, "\n");        
+        if (command_length == 0) {
             // Only newline
             continue;
         }
-
-        // Remove the newline at the end
-        command[--command_length] = '\0';
-
-        if (check_prefix(command, COMMAND_LIST_CLIENT)) {
+        
+        // Remove trailing newline
+        command[command_length--] = '\0';
+        
+        if (check_first_token(command, COMMAND_LIST_CLIENT)) {
             // TODO: Implement these functions
             // Will need to initialize client->current_path in main() first and then use it here
-        } else if (check_prefix(command, COMMAND_CHANGE_DIRECTORY_CLIENT)) {
+        } else if (check_first_token(command, COMMAND_CHANGE_DIRECTORY_CLIENT)) {
 
-        } else if (check_prefix(command, COMMAND_PRINT_DIRECTORY_CLIENT)) {
+        } else if (check_first_token(command, COMMAND_PRINT_DIRECTORY_CLIENT)) {
         
-        } else if (check_prefix(command, COMMAND_LIST)) {
+        } else if (check_first_token(command, COMMAND_LIST)) {
             execute_command_list(client);
-        } else if (check_prefix(command, COMMAND_STORE)) {
+        } else if (check_first_token(command, COMMAND_STORE)) {
             execute_command_store(client, command);
-        } else if (check_prefix(command, COMMAND_RETRIEVE)) {
+        } else if (check_first_token(command, COMMAND_RETRIEVE)) {
             execute_command_retrieve(client, command);
         } else {
             // This includes PORT (which effectively does nothing since it is
-            // sent again before LIST, STORE, or RETRIEVE)
+            // sent again before LIST, STORE, or RETR)
 
             // TODO: Handle "PORT" being entered with nothing else hanging the program
-            send_then_print_response(client->control_sockfd, command);
+            
+            send_message(client->control_sockfd, command);
+            receive_response_then_print(client->control_sockfd);
 
-            if (check_prefix(command, COMMAND_QUIT)) {
+            if (check_first_token(command, COMMAND_QUIT)) {
                 break;
             }
         }
@@ -84,7 +96,7 @@ int send_data_port(struct client_state *client) {
         int x = (address >> (8 * i)) & 0xff;
         p += sprintf(buf + p, "%d,", x);
     }
-    // Add port to buffer
+    // Add port to buffer (in host order)
     int port = client->data_port;
     for (int i = 1; i >= 0; i--) {
         int x = (port >> (8 * i)) & 0xff;
@@ -93,32 +105,9 @@ int send_data_port(struct client_state *client) {
     }
 
     // Send to server
-    printf("Sending address %d and port %d as: %s\n", address, client->data_port, buf);
     send_message(client->control_sockfd, buf);
 
-    // Wait for response from server
-    char response[COMMAND_STR_MAX];
-    int bytes_received = recv(client->control_sockfd, response, COMMAND_STR_MAX - 1, 0);
-
-    if (bytes_received == -1) {
-        perror("recv");
-        exit(EXIT_FAILURE);
-    } else if (bytes_received == 0) {
-        // Server closed the connection unexpectedly
-        fprintf(stderr, "Server closed the connection unexpectedly.\n");
-        exit(EXIT_FAILURE);
-    } else {
-        response[bytes_received] = '\0';
-        // Check if server sent proper response
-        if (check_prefix(response, "200")) {
-            // Server sent OK response
-            return 0;
-        } else {
-            // Server sent an error response
-            fprintf(stderr, "Server response: %s\n", response);
-            return -1;
-        }
-    }
+    return receive_response_then_check_first_token_then_print_response_if_ok(client->control_sockfd, "200") ? 0 : -1;
 }
 
 void initiate_data_transfer(struct client_state *client) {
@@ -126,71 +115,81 @@ void initiate_data_transfer(struct client_state *client) {
     struct sockaddr_in server_addr;
     socklen_t addr_len = sizeof(server_addr);
 
-    printf("Starting to wait for accept\n");
     int data_sockfd = accept(client->data_listen_sockfd, (struct sockaddr *) &server_addr, &addr_len);
     if (data_sockfd == -1) {
         perror("accept");
         exit(EXIT_FAILURE);
     }
     
-    printf("Accept success\n");
     client->data_sockfd = data_sockfd;
-    client->state = CLIENT_STATE_DATA;
 }
 
 void end_data_transfer(struct client_state *client) {
-    close(client->data_listen_sockfd);
     close(client->data_sockfd);
-    client->data_listen_sockfd = -1;
     client->data_sockfd = -1;
     client->data_port = -1;
-    client->state = CLIENT_STATE_CONTROL;
 }
 
 void execute_command_list(struct client_state *client) {
-    static char buf[COMMAND_STR_MAX];
-
     // Start listening on some port for data, send the port
     listen_port(0, &(client->data_listen_sockfd), &(client->data_port));
     if (send_data_port(client) == -1) {
         return;
     }
     
-    // Send the command
-    send_then_print_response(client->control_sockfd, COMMAND_LIST);
+    // Send the command, get server response
+    send_message(client->control_sockfd, COMMAND_LIST);
+    if (!receive_response_then_check_first_token_then_print_response_if_ok(client->control_sockfd, "150")) {
+        return;
+    }
+
     initiate_data_transfer(client);
     
-    // TODO: recv() files from data port
-    // Could just be a string like "file1.txt\nimage2.txt\ndoc1.pdf\nfile2.txt"
+    // Receive list of files
+    receive_response_then_print(client->data_sockfd);
 
     end_data_transfer(client);
+
+    // Stop listening for new connections
+    close(client->data_listen_sockfd);
+    client->data_listen_sockfd = -1;
+
+    receive_response_then_print(client->control_sockfd);
 }
 
 void execute_command_store(struct client_state *client, char *command) {
+    static char buf[COMMAND_STR_MAX];
+
     // TODO: Read file path from 'command'. Similar logic to handle_command_username() in server.c
     // The path should contain no '/'
     // Then, validate that a file exists at this path
 
     // Command has been validated
-    
     // Start listening on some port for data, send the port
     listen_port(0, &(client->data_listen_sockfd), &(client->data_port));
     if (send_data_port(client) == -1) {
         return;
     }
 
-    // Send the command
-    send_then_print_response(client->control_sockfd, command);
-    initiate_data_transfer(client);
+    // Send the command, get server response
+    send_message(client->control_sockfd, command);
+    if (!receive_response_then_check_first_token_then_print_response_if_ok(client->control_sockfd, "150")) {
+        return;
+    }
     
-    // TODO: Ensure server sent proper response back
-
+    initiate_data_transfer(client);
     
     // TODO: Send file through the data socket
     // This should be a function probably in common.h, because it will also be used
     // by the server
 
     end_data_transfer(client);
+
+    // Stop listening for new connections
+    close(client->data_listen_sockfd);
+    client->data_listen_sockfd = -1;
+    
+    receive_response_then_print(client->control_sockfd);
 }
 
 void execute_command_retrieve(struct client_state *client, char *command) {
@@ -202,13 +201,14 @@ void execute_command_retrieve(struct client_state *client, char *command) {
         return;
     }
 
-    // Send the command
-    send_then_print_response(client->control_sockfd, command);
-    initiate_data_transfer(client);
-    
-    // TODO: Ensure server sent proper response back
+    // Send the command, get server response
+    send_message(client->control_sockfd, command);
+    if (!receive_response_then_check_first_token_then_print_response_if_ok(client->control_sockfd, "150")) {
+        return;
+    }
 
-    
+    initiate_data_transfer(client);
+
     // TODO: Receive file from data socket
     // Possibly by receiving it in buffer, COMMAND_STR_MAX bytes at a time,
     // and simultaneously writing it to disk?
@@ -216,4 +216,10 @@ void execute_command_retrieve(struct client_state *client, char *command) {
     // by the server
     
     end_data_transfer(client);
+
+    // Stop listening for new connections
+    close(client->data_listen_sockfd);
+    client->data_listen_sockfd = -1;
+    
+    receive_response_then_print(client->control_sockfd);
 }

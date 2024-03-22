@@ -1,3 +1,5 @@
+server/users/*
+
 # Compiled Object files
 *.o
 *.obj

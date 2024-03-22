@@ -2,6 +2,7 @@
 #define _COMMON_H_
 
 #include <limits.h>
+#include <netinet/in.h>
 
 // TODO: Change to 21, 20
 #define SERVER_CONTROL_PORT 2100
@@ -25,15 +26,9 @@ extern const char
  */
 void create_directory_if_not_exists(char *path);
 
-void list_directory(char *path);
+int list_directory(char *path, char *result, int result_size);
 
-/**
- * @brief Check if the prefix of string is equal to prefix.
- * string_length must be positive.
- * 
- * @return int 1 if equal, 0 otherwise
- */
-int check_prefix(const char *string, const char *prefix);
+int check_first_token(const char *string, const char *token);
 
 /**
  * @brief Create a TCP socket, bind it to the given port, and start listening for
@@ -45,10 +40,12 @@ int check_prefix(const char *string, const char *prefix);
  */
 void listen_port(int port, int *sockfd_result, int *port_result);
 
-void connect_to_address_and_port(int address, int port, int *result_sockfd);
+void connect_to_addr(struct sockaddr_in addr, int *result_sockfd);
 
 void send_message(int sockfd, const char *message);
 
-void send_then_print_response(int sockfd, const char *message);
+void receive_response_then_print(int sockfd);
+
+int receive_response_then_check_first_token_then_print_response_if_ok(int sockfd, const char *expected);
 
 #endif

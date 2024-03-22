@@ -8,11 +8,7 @@ extern const char
     *COMMAND_CHANGE_DIRECTORY_CLIENT,
     *COMMAND_PRINT_DIRECTORY_CLIENT;
 
-#define CLIENT_STATE_CONTROL 0
-#define CLIENT_STATE_DATA 1
-
 struct client_state {
-    int state;
     int control_sockfd;
     int data_listen_sockfd;
     int data_sockfd;

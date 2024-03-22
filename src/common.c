@@ -4,7 +4,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <netinet/in.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
@@ -37,38 +36,52 @@ void create_directory_if_not_exists(char *path) {
     }
 }
 
-void list_directory(char *path) {
+int list_directory(char *path, char *result, int result_size) {
     // Credits: https://stackoverflow.com/questions/4204666/how-to-list-files-in-a-directory-in-a-c-program
-    DIR *d = opendir(path);
-    if (!d) return;
-
-    struct dirent *dir; 
-    while ((dir = readdir(d)) != NULL) {
-        printf("%s\n", dir->d_name);
+    // Open the current directory
+    DIR *dir = opendir(path);
+    if (dir == NULL) {
+        perror("opendir");
+        return -1;
     }
-    closedir(d);
-}
 
-int check_prefix(const char *string, const char *prefix) {
-    while (*string != '\0' && *prefix != '\0') {
-        if (*string != *prefix) {
-            return 0;
+    // Read directory entries
+    struct dirent *entry;
+    int p = 0;
+    while ((entry = readdir(dir)) != NULL) {
+        int remaining_bytes = result_size - p - 1;
+        if (remaining_bytes < (int)strlen(entry->d_name)) {
+            break;
         }
 
-        string++;
-        prefix++;
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            // Skip non-file entries
+            continue;
+        }
+
+        // Add entry name to result
+        p += sprintf(result + p, "%s%s", p == 0 ? "" : "\n", entry->d_name);
     }
 
-    if (*prefix == '\0') {    
-        // Prefix ended before (or at same time) as string
-        return 1;
-    } else if (*string == '\0') {
-        // String ended before prefix
+    // Close the directory
+    closedir(dir);
+
+    return 0;
+}
+
+int check_first_token(const char *string, const char *token) {
+    static char buf[COMMAND_STR_MAX];
+    
+    size_t string_length = strlen(string);
+    size_t token_length = strlen(token);
+    if (string_length < token_length) {
         return 0;
-    } else {
-        // This should never be reached
-        return 0;
+    } else if (string_length == token_length) {
+        return strcmp(string, token) == 0;
     }
+    
+    sprintf(buf, "%s ", token);
+    return strncmp(string, buf, token_length + 1) == 0;
 }
 
 void listen_port(int port, int *sockfd_result, int *port_result) {
@@ -113,11 +126,12 @@ void listen_port(int port, int *sockfd_result, int *port_result) {
             perror("getsockname");
             exit(EXIT_FAILURE);
         }
-        *port_result = ntohs(addr.sin_port);
+        *port_result = ntohs(addr.sin_port);        
+        printf("Successfully started listening on port %d\n", *port_result);
     }
 }
 
-void connect_to_address_and_port(int address, int port, int *result_sockfd) {
+void connect_to_addr(struct sockaddr_in addr, int *result_sockfd) {
     // Get socket file descriptor
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd == -1) {
@@ -131,15 +145,8 @@ void connect_to_address_and_port(int address, int port, int *result_sockfd) {
         exit(EXIT_FAILURE);
     }
 
-    // Specify address and port to connect socket to
-    struct sockaddr_in target_addr;
-    memset(&target_addr, 0, sizeof(target_addr));
-    target_addr.sin_family = AF_INET; // IPV4
-    target_addr.sin_addr.s_addr = address;
-    target_addr.sin_port = htons(port);
-
     // Connect socket to server
-    if (connect(sockfd, (struct sockaddr *) &target_addr, sizeof(target_addr)) == -1) {
+    if (connect(sockfd, (struct sockaddr *) &addr, sizeof(addr)) == -1) {
         perror("connect");
         exit(EXIT_FAILURE);
     }
@@ -154,19 +161,17 @@ void send_message(int sockfd, const char *message) {
     }
 }
 
-void send_then_print_response(int sockfd, const char *message) {
+void receive_response_then_print(int sockfd) {
     static char buf[COMMAND_STR_MAX];
 
-    // Send to server
-    printf("Sending: %s\n", message);
-    send_message(sockfd, message);
-
     // Receive response
-    // TODO: Program often blocks here because the server isn't sending a response for most commands.
-    // Once all handle() functions in the server are implemented, it shouldn't hang.
     int bytes_received = (int)recv(sockfd, buf, COMMAND_STR_MAX - 1, 0);
     if (bytes_received == -1) {
         perror("recv");
+        exit(EXIT_FAILURE);
+    } else if (bytes_received == 0) {
+        // Server closed the connection unexpectedly
+        fprintf(stderr, "Connection was closed unexpectedly.\n");
         exit(EXIT_FAILURE);
     }
 
@@ -175,4 +180,30 @@ void send_then_print_response(int sockfd, const char *message) {
     
     // Print the response
     printf("%s\n", buf);
+}
+
+int receive_response_then_check_first_token_then_print_response_if_ok(int sockfd, const char *expected) {
+    static char buf[COMMAND_STR_MAX];
+
+    int bytes_received = recv(sockfd, buf, COMMAND_STR_MAX - 1, 0);
+    if (bytes_received == -1) {
+        perror("recv");
+        exit(EXIT_FAILURE);
+    } else if (bytes_received == 0) {
+        // Server closed the connection unexpectedly
+        fprintf(stderr, "Connection was closed unexpectedly.\n");
+        exit(EXIT_FAILURE);
+    } else {
+        // Null-terminate the response
+        buf[bytes_received] = '\0';
+
+        // Check if response starts with expected token
+        if (check_first_token(buf, expected)) {
+            printf("%s\n", buf);
+            return 1;
+        } else {
+            fprintf(stderr, "Unexpected response: %s\n", buf);
+            return 0;
+        }
+    }
 }

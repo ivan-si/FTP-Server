@@ -53,6 +53,10 @@ struct server_state {
  */
 void initialize_server_directories(struct server_state *server);
 
+void initialize_user_storage_directory(struct server_state *server, struct user_auth_data *auth_data);
+
+void initialize_current_path(struct server_state *server, struct server_client_state *client);
+
 /**
  * @brief Manage new incoming control connections and established connections
  */
@@ -73,10 +77,6 @@ void add_auth_data(struct server_state *server, char *username, char *password);
 
 struct user_auth_data* find_auth_data_by_username(struct server_state *server, char *username);
 
-void initialize_user_storage_directory(struct server_state *server, struct user_auth_data *auth_data);
-
-void initialize_current_path(struct server_state *server, struct server_client_state *client);
-
 /**
  * @brief Handle an incoming client command.
  */
@@ -86,7 +86,7 @@ void handle_command_username(struct server_state *server, struct server_client_s
 
 void handle_command_password(struct server_state *server, struct server_client_state *client, char *command);
 
-void handle_command_port(struct server_state *server, struct server_client_state *client, char *command);
+void handle_command_port(struct server_client_state *client, char *command);
 
 void handle_command_store(struct server_state *server, struct server_client_state *client, char *command);
 
