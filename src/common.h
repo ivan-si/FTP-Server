@@ -1,11 +1,13 @@
 #ifndef _COMMON_H_
 #define _COMMON_H_
 
+#include <limits.h>
+
 // TODO: Change to 21, 20
 #define SERVER_CONTROL_PORT 2100
 #define SERVER_DATA_PORT 2000
 
-#define COMMAND_STR_MAX 1024
+#define COMMAND_STR_MAX (2 * PATH_MAX)
 
 extern const char
     *COMMAND_USERNAME,
@@ -42,5 +44,11 @@ int check_prefix(const char *string, const char *prefix);
  * @param port_result Location to store the port the socket was bound to.
  */
 void listen_port(int port, int *sockfd_result, int *port_result);
+
+void connect_to_address_and_port(int address, int port, int *result_sockfd);
+
+void send_message(int sockfd, const char *message);
+
+void send_then_print_response(int sockfd, const char *message);
 
 #endif

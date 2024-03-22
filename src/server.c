@@ -1,6 +1,7 @@
 #include "server.h"
 #include "common.h"
 
+#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,6 +12,14 @@
 
 int main() {
     struct server_state server;
+    
+    char cwd[PATH_MAX];
+    if (getcwd(cwd, sizeof(cwd)) != NULL) {
+        printf("Current working dir: %s\n", cwd);
+    } else {
+        perror("getcwd() error");
+        return 1;
+    }
     
     initialize_server_directories(&server);
     read_auth_data(&server);
@@ -35,41 +44,6 @@ void initialize_server_directories(struct server_state *server) {
     strcat(buf, "/users");
     create_directory_if_not_exists(buf);
     strncpy(server->users_storage_path, buf, sizeof(buf));
-}
-
-void listen_control_port(struct server_state *server) {
-    // Get socket file descriptor
-    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd == -1) {
-        perror("socket");
-        exit(EXIT_FAILURE);
-    }
-
-    // Set socket options to avoid bind() errors
-    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int)) == -1) {
-        perror("setsockopt");
-        exit(EXIT_FAILURE);
-    }
-
-    // Specify address and port to connect socket to
-    struct sockaddr_in server_addr;
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET; // IPv4
-    server_addr.sin_addr.s_addr = INADDR_ANY; // Listen to all network interfaces and IP addresses
-    server_addr.sin_port = htons(SERVER_CONTROL_PORT);
-    
-    // Bind socket to port
-    if (bind(sockfd, (struct sockaddr *) &server_addr, sizeof(server_addr)) == -1) {
-        perror("bind");
-        exit(EXIT_FAILURE);
-    }
-
-    // Listen for connections on port
-    if (listen(sockfd, BACKLOG) == -1) {
-        perror("listen");
-        exit(EXIT_FAILURE);
-    }
-
 }
 
 void monitor_control_port(struct server_state *server) {
@@ -157,7 +131,7 @@ void handle_command(struct server_state *server, struct server_client_state *cli
         handle_command_quit(server, client);
     } else {
         // Command is not implemented
-        send_to_client(client, "202 Command not implemented.");
+        send_message(client->sockfd, "202 Command not implemented.");
     }
 }
 
@@ -165,7 +139,7 @@ void handle_command_username(struct server_state *server, struct server_client_s
     static char buf[AUTH_STR_MAX];
     
     if (client->state != SERVER_CLIENT_STATE_NEED_USERNAME) {
-        send_to_client(client, "503 Bad sequence of commands.");
+        send_message(client->sockfd, "503 Bad sequence of commands.");
         return;
     }
 
@@ -175,13 +149,13 @@ void handle_command_username(struct server_state *server, struct server_client_s
     struct user_auth_data *auth_data = find_auth_data_by_username(server, buf);
     if (auth_data == NULL) {
         // No user with the username was found
-        send_to_client(client, "530 Not logged in.");
+        send_message(client->sockfd, "530 Not logged in.");
     } else {
         // Update client state
         client->state = SERVER_CLIENT_STATE_NEED_PASSWORD;
         client->auth_data = auth_data;
 
-        send_to_client(client, "331 Username OK, need password.");
+        send_message(client->sockfd, "331 Username OK, need password.");
     }
 }
 
@@ -189,7 +163,7 @@ void handle_command_password(struct server_state *server, struct server_client_s
     static char buf[AUTH_STR_MAX];
         
     if (client->state != SERVER_CLIENT_STATE_NEED_PASSWORD) {
-        send_to_client(client, "503 Bad sequence of commands.");
+        send_message(client->sockfd, "503 Bad sequence of commands.");
         return;
     }
 
@@ -199,51 +173,25 @@ void handle_command_password(struct server_state *server, struct server_client_s
     if (strcmp(client->auth_data->password, buf) == 0) {
         // Password matches
         client->state = SERVER_CLIENT_STATE_AUTHENTICATED;
-        send_to_client(client, "230 User logged in, proceed.");
+        initialize_current_path(server, client);
+        send_message(client->sockfd, "230 User logged in, proceed.");
     } else {
         // Password does not match
         client->state = SERVER_CLIENT_STATE_NEED_USERNAME;
         client->auth_data = NULL;
-        send_to_client(client, "530 Not logged in.");
+        send_message(client->sockfd, "530 Not logged in.");
     }
-}
-
-void handle_command_port(struct server_state *server, struct server_client_state *client, char *command) {
-    
-}
-
-void handle_command_store(struct server_state *server, struct server_client_state *client, char *command) {
-
-}
-
-void handle_command_retrieve(struct server_state *server, struct server_client_state *client, char *command) {
-
-}
-
-void handle_command_list(struct server_state *server, struct server_client_state *client) {
-    
-}
-
-void handle_command_change_directory(struct server_state *server, struct server_client_state *client, char *command) {
-
-}
-
-void handle_command_print_directory(struct server_state *server, struct server_client_state *client) {
-
-}
-
-void handle_command_quit(struct server_state *server, struct server_client_state *client) {
-    send_to_client(client, "221 Service closing control connection.");
-    remove_client(server, client);
 }
 
 void add_new_client(struct server_state *server, int client_sockfd) {
     // Initialize structure
     struct server_client_state *client = malloc(sizeof(struct server_client_state));
     client->sockfd = client_sockfd;
-    client->state= SERVER_CLIENT_STATE_NEED_USERNAME;
+    client->state = SERVER_CLIENT_STATE_NEED_USERNAME;
     client->auth_data = NULL;
-
+    client->has_data_addr = 0;
+    client->data_addr.sin_family = AF_INET; // IPV4
+    
     // Make structure head of linked list
     client->next = server->clients;
     server->clients = client;
@@ -283,21 +231,47 @@ struct server_client_state* find_client_by_sockfd(struct server_state *server, i
     return NULL;
 }
 
-void send_to_client(struct server_client_state *client, char *message) {
-    if (send(client->sockfd, message, strlen(message), 0) == -1) {
-        perror("send");
-        exit(EXIT_FAILURE);
-    }
-}
-
 void read_auth_data(struct server_state *server) {
     server->users_auth_data = NULL;
 
-    // TODO: Read from users.txt, a file which should be located at server->base_path
-    // Checking if the file exists is outside of the scope of this project
-    // Store results in server->users_auth_data in the form of a linked list
+    // Open the users.txt file for reading
+    static char users_txt_path[PATH_MAX * 2];
+    sprintf(users_txt_path, "%s/users.txt", server->base_path);
 
-    add_auth_data(server, "abc", "def");
+    // If path is too long, error since system will error later anyway
+    size_t users_txt_path_length = strlen(users_txt_path);
+    if (users_txt_path_length > PATH_MAX) {
+        fprintf(stderr, "users.txt path too long\n");
+        exit(EXIT_FAILURE);
+    }
+
+    FILE *file = fopen(users_txt_path, "r");
+    if (file == NULL) {
+        perror("fopen");
+        exit(EXIT_FAILURE);
+    }
+
+    // Read each line from the file and parse username and password
+    static char line[AUTH_STR_MAX + 1 + AUTH_STR_MAX];
+    while (fgets(line, sizeof(line), file) != NULL) {
+        // Remove trailing newline character
+        line[strcspn(line, "\n")] = '\0';
+
+        // Tokenize the line to extract username and password
+        char *username = strtok(line, " ");
+        char *password = strtok(NULL, " ");
+
+        // Skip empty lines
+        if (username == NULL || password == NULL) {
+            continue;
+        }
+
+        // Add the authentication data to the linked list
+        add_auth_data(server, username, password);
+    }
+
+    // Close the file
+    fclose(file);
 
     // For each user, create their storage directory if it is missing
     for (struct user_auth_data *node = server->users_auth_data; node != NULL; node = node->next) {
@@ -327,7 +301,156 @@ struct user_auth_data* find_auth_data_by_username(struct server_state *server, c
 }
 
 void initialize_user_storage_directory(struct server_state *server, struct user_auth_data *auth_data) {
-    static char buf[PATH_MAX + 2 + AUTH_STR_MAX];
-    sprintf(buf, "/%s/%s", server->users_storage_path, auth_data->username);
+    static char buf[PATH_MAX + 1 + AUTH_STR_MAX];
+    sprintf(buf, "%s/%s", server->users_storage_path, auth_data->username);
     create_directory_if_not_exists(buf);
+}
+
+void initialize_current_path(struct server_state *server, struct server_client_state *client) {
+    static char buf[PATH_MAX + 1 + AUTH_STR_MAX];
+    
+    sprintf(buf, "%s/%s", server->users_storage_path, client->auth_data->username);
+
+    size_t buf_length = strlen(buf);
+    if (buf_length > PATH_MAX) {
+        fprintf(stderr, "User current path too long for user %s: %s\n", client->auth_data->username, buf);
+        exit(EXIT_FAILURE);
+    }
+
+    strncpy(client->current_path, buf, sizeof(client->current_path));
+
+    printf("Initialized current path: %s\n", client->current_path);
+}
+
+void handle_command_port(struct server_state *server, struct server_client_state *client, char *command) {
+    if (client->state != SERVER_CLIENT_STATE_AUTHENTICATED) {
+        // Not logged in, invalid sequence of commands
+        send_message(client->sockfd, "503 Bad sequence of commands.");
+        return;
+    }
+
+    // Parse the command for the address and port
+    int h1, h2, h3, h4, p1, p2;
+    sscanf(command, "%*s %d,%d,%d,%d,%d,%d", &h1, &h2, &h3, &h4, &p1, &p2);
+
+    in_addr_t address = (h1 << (3 * 8)) | (h2 << (2 * 8)) | (h3 << 8) | h4;
+    uint16_t port = (p1 << 8) | p2;
+
+    // Store address and port into state structure
+    client->has_data_addr = 1;
+
+    client->data_addr.sin_addr.s_addr = address;
+    client->data_addr.sin_port = htons(port);
+
+    printf("Received address %d and port %d\n", address, port);
+
+    send_message(client->sockfd, "200 PORT command successful.");
+}
+
+void handle_command_store(struct server_state *server, struct server_client_state *client, char *command) {
+    if (client->state != SERVER_CLIENT_STATE_AUTHENTICATED) {
+        // Not logged in, invalid sequence of commands
+        send_message(client->sockfd, "503 Bad sequence of commands.");
+        return;
+    }
+    if (!client->has_data_addr) {
+        send_message(client->sockfd, "503 Bad sequence of commands.");
+        return;
+    }
+
+
+}
+
+void handle_command_retrieve(struct server_state *server, struct server_client_state *client, char *command) {
+    if (client->state != SERVER_CLIENT_STATE_AUTHENTICATED) {
+        // Not logged in, invalid sequence of commands
+        send_message(client->sockfd, "503 Bad sequence of commands.");
+        return;
+    }
+    if (!client->has_data_addr) {
+        send_message(client->sockfd, "503 Bad sequence of commands.");
+        return;
+    }
+
+
+}
+
+void handle_command_list(struct server_state *server, struct server_client_state *client) {
+    if (client->state != SERVER_CLIENT_STATE_AUTHENTICATED) {
+        // Not logged in, invalid sequence of commands
+        send_message(client->sockfd, "503 Bad sequence of commands.");
+        return;
+    }
+    if (!client->has_data_addr) {
+        send_message(client->sockfd, "503 Bad sequence of commands.");
+        return;
+    }
+
+    // Open the current directory
+    DIR *dir = opendir(client->current_path);
+    if (dir == NULL) {
+        perror("opendir");
+        send_message(client->sockfd, "550 Failed to open directory.");
+        return;
+    }
+
+    // Read directory entries
+    struct dirent *entry;
+    char list_response[COMMAND_STR_MAX] = "";
+    while ((entry = readdir(dir)) != NULL) {
+        strcat(list_response, entry->d_name);
+        strcat(list_response, "\n");
+    }
+    
+    // Close directory
+    closedir(dir);
+
+    // Send ready response
+    send_message(client->sockfd, "150 File status okay; about to open data connection.");
+
+    int data_sockfd;
+    connect_to_address_and_port(client->data_addr.sin_addr.s_addr, client->data_addr.sin_port, &data_sockfd);
+
+    printf("About to send message through data socket\n");
+    send_message(data_sockfd, list_response);
+
+    close(data_sockfd);
+
+    // Notify client that the data transfer is complete
+    send_message(client->sockfd, "226 Transfer completed.");
+}
+
+void handle_command_change_directory(struct server_state *server, struct server_client_state *client, char *command) {
+    if (client->state != SERVER_CLIENT_STATE_AUTHENTICATED) {
+        // Not logged in, invalid sequence of commands
+        send_message(client->sockfd, "503 Bad sequence of commands.");
+        return;
+    }
+
+}
+
+void handle_command_print_directory(struct server_state *server, struct server_client_state *client) {
+    if (client->state != SERVER_CLIENT_STATE_AUTHENTICATED) {
+        // Not logged in, invalid sequence of commands
+        send_message(client->sockfd, "503 Bad sequence of commands.");
+        return;
+    }
+
+    // Get the current directory path
+    static char current_directory[PATH_MAX];
+    if (getcwd(current_directory, sizeof(current_directory)) == NULL) {
+        perror("getcwd");
+        send_message(client->sockfd, "451 Requested action aborted. Local error in processing.");
+        return;
+    }
+
+    // Responding with current directory path
+    static char response[COMMAND_STR_MAX];
+    sprintf(response, "257 \"%s\" ", current_directory);
+    send_message(client->sockfd, response);
+}
+
+void handle_command_quit(struct server_state *server, struct server_client_state *client) {
+    send_message(client->sockfd, "221 Service closing control connection.");
+    remove_client(server, client);
 }
