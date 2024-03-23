@@ -27,7 +27,7 @@ struct user_auth_data {
  * @brief State of a connected client
  */
 struct server_client_state {
-    int sockfd;
+    int control_sockfd;
     int state;
     struct user_auth_data *auth_data;
     char current_path[PATH_MAX];
@@ -43,7 +43,7 @@ struct server_state {
     char base_path[PATH_MAX]; // The root directory for all server files
     char users_storage_path[PATH_MAX]; // The directory which will store a list of directories, one for each user
     struct user_auth_data *users_auth_data;
-    int control_sockfd;
+    int control_sockfd; // Socket for accepting new clients
     struct server_client_state *clients;
     fd_set listen_sockfds;
 };
@@ -62,11 +62,13 @@ void initialize_current_path(struct server_state *server, struct server_client_s
  */
 void monitor_control_port(struct server_state *server);
 
+void handle_client_sending_data(struct server_state *server, struct server_client_state *client);
+
 void add_new_client(struct server_state *server, int client_sockfd);
 
 void remove_client(struct server_state *server, struct server_client_state *client);
 
-struct server_client_state* find_client_by_sockfd(struct server_state *server, int sockfd);
+struct server_client_state* find_client_by_control_sockfd(struct server_state *server, int control_sockfd);
 
 /**
  * @brief Read the auth data *usernames and passwords from the users.txt file and store them
@@ -88,11 +90,11 @@ void handle_command_password(struct server_state *server, struct server_client_s
 
 void handle_command_port(struct server_client_state *client, char *command);
 
-void handle_command_store(struct server_state *server, struct server_client_state *client, char *command);
+void handle_command_store(struct server_client_state *client, char *command);
 
-void handle_command_retrieve(struct server_state *server, struct server_client_state *client, char *command);
+void handle_command_retrieve(struct server_client_state *client, char *command);
 
-void handle_command_list(struct server_state *server, struct server_client_state *client);
+void handle_command_list(struct server_client_state *client);
 
 void handle_command_change_directory(struct server_state *server, struct server_client_state *client, char *command);
 

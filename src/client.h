@@ -13,7 +13,6 @@ struct client_state {
     int data_listen_sockfd;
     int data_sockfd;
     int data_port;
-    char current_path[PATH_MAX];
 };
 
 void get_commands(struct client_state *client);
@@ -31,5 +30,11 @@ void execute_command_list(struct client_state *client);
 void execute_command_store(struct client_state *client, char *command);
 
 void execute_command_retrieve(struct client_state *client, char *command);
+
+void execute_command_change_directory_client(char *command);
+
+void print_current_directory();
+
+void print_files_current_directory();
 
 #endif

@@ -1,4 +1,4 @@
-server/users/*
+bin/*
 
 # Compiled Object files
 *.o

@@ -1,6 +1,7 @@
 #include "client.h"
 #include "common.h"
 
+#include <libgen.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,7 +30,7 @@ int main() {
 
     connect_to_addr(server_addr, &(client.control_sockfd));
     
-    if (!receive_response_then_check_first_token_then_print_response_if_ok(client.control_sockfd, "220")) {
+    if (!receive_message_then_print_then_check_first_token(client.control_sockfd, "220")) {
         exit(EXIT_FAILURE);
     }
 
@@ -57,12 +58,11 @@ void get_commands(struct client_state *client) {
         command[command_length--] = '\0';
         
         if (check_first_token(command, COMMAND_LIST_CLIENT)) {
-            // TODO: Implement these functions
-            // Will need to initialize client->current_path in main() first and then use it here
+            print_files_current_directory();
         } else if (check_first_token(command, COMMAND_CHANGE_DIRECTORY_CLIENT)) {
-
+            execute_command_change_directory_client(command);
         } else if (check_first_token(command, COMMAND_PRINT_DIRECTORY_CLIENT)) {
-        
+            print_current_directory();
         } else if (check_first_token(command, COMMAND_LIST)) {
             execute_command_list(client);
         } else if (check_first_token(command, COMMAND_STORE)) {
@@ -76,7 +76,7 @@ void get_commands(struct client_state *client) {
             // TODO: Handle "PORT" being entered with nothing else hanging the program
             
             send_message(client->control_sockfd, command);
-            receive_response_then_print(client->control_sockfd);
+            receive_message_then_print(client->control_sockfd);
 
             if (check_first_token(command, COMMAND_QUIT)) {
                 break;
@@ -107,7 +107,9 @@ int send_data_port(struct client_state *client) {
     // Send to server
     send_message(client->control_sockfd, buf);
 
-    return receive_response_then_check_first_token_then_print_response_if_ok(client->control_sockfd, "200") ? 0 : -1;
+    return receive_message_then_print_then_check_first_token(client->control_sockfd, "200")
+        ? 0
+        : -1;
 }
 
 void initiate_data_transfer(struct client_state *client) {
@@ -139,14 +141,14 @@ void execute_command_list(struct client_state *client) {
     
     // Send the command, get server response
     send_message(client->control_sockfd, COMMAND_LIST);
-    if (!receive_response_then_check_first_token_then_print_response_if_ok(client->control_sockfd, "150")) {
+    if (!receive_message_then_print_then_check_first_token(client->control_sockfd, "150")) {
         return;
     }
 
     initiate_data_transfer(client);
     
     // Receive list of files
-    receive_response_then_print(client->data_sockfd);
+    receive_message_then_print(client->data_sockfd);
 
     end_data_transfer(client);
 
@@ -154,72 +156,129 @@ void execute_command_list(struct client_state *client) {
     close(client->data_listen_sockfd);
     client->data_listen_sockfd = -1;
 
-    receive_response_then_print(client->control_sockfd);
+    receive_message_then_print(client->control_sockfd);
 }
 
 void execute_command_store(struct client_state *client, char *command) {
     static char buf[COMMAND_STR_MAX];
 
-    // TODO: Read file path from 'command'. Similar logic to handle_command_username() in server.c
-    // The path should contain no '/'
-    // Then, validate that a file exists at this path
+    // Extract the path from the command and ensure it points to a file
+    strtok(command, " ");
+    char *path = strtok(NULL, " ");
+    if (!is_path_file(path)) {
+        printf("Error: Given path is not a file\n");
+        return;
+    }
 
-    // Command has been validated
+    // Extract the filename from the path
+    // Compose the message to send to the server
+    char *filename = basename(path);
+    sprintf(buf, "%s %s", COMMAND_STORE, filename);
+
     // Start listening on some port for data, send the port
     listen_port(0, &(client->data_listen_sockfd), &(client->data_port));
     if (send_data_port(client) == -1) {
         return;
     }
 
-    // Send the command, get server response
-    send_message(client->control_sockfd, command);
-    if (!receive_response_then_check_first_token_then_print_response_if_ok(client->control_sockfd, "150")) {
+    // Send the command message, get server response
+    send_message(client->control_sockfd, buf);
+    if (!receive_message_then_print_then_check_first_token(client->control_sockfd, "150")) {
         return;
     }
     
+    // Initiate the data connection, wait for server to connect, then send the file
     initiate_data_transfer(client);
-    
-    // TODO: Send file through the data socket
-    // This should be a function probably in common.h, because it will also be used
-    // by the server
-
+    send_file(client->data_sockfd, path);
     end_data_transfer(client);
 
     // Stop listening for new connections
     close(client->data_listen_sockfd);
     client->data_listen_sockfd = -1;
     
-    receive_response_then_print(client->control_sockfd);
+    receive_message_then_print(client->control_sockfd);
 }
 
 void execute_command_retrieve(struct client_state *client, char *command) {
     static char buf[COMMAND_STR_MAX];
 
+    // Extract the filename
+    strtok(command, " ");
+    char *filename = strtok(NULL, " ");
+
+    // Ensure only a file is being asked for (no directory changing or relative paths)
+    char *last_slash = strrchr(filename, '/');
+    if (last_slash != NULL) {
+        printf("Error: Must provide only a filename\n");
+        return;
+    }
+
     // Start listening on some port for data, send the port
     listen_port(0, &(client->data_listen_sockfd), &(client->data_port));
     if (send_data_port(client) == -1) {
         return;
     }
 
-    // Send the command, get server response
-    send_message(client->control_sockfd, command);
-    if (!receive_response_then_check_first_token_then_print_response_if_ok(client->control_sockfd, "150")) {
+    // Prepare the command message to send;
+    // Send the message, get server response
+    sprintf(buf, "%s %s", COMMAND_RETRIEVE, filename);
+    send_message(client->control_sockfd, buf);
+    if (!receive_message_then_print_then_check_first_token(client->control_sockfd, "150")) {
         return;
     }
 
     initiate_data_transfer(client);
-
-    // TODO: Receive file from data socket
-    // Possibly by receiving it in buffer, COMMAND_STR_MAX bytes at a time,
-    // and simultaneously writing it to disk?
-    // This should be a function probably in common.h, because it will also be used
-    // by the server
-    
+    save_file(client->data_sockfd, filename);
     end_data_transfer(client);
 
     // Stop listening for new connections
     close(client->data_listen_sockfd);
     client->data_listen_sockfd = -1;
     
-    receive_response_then_print(client->control_sockfd);
+    receive_message_then_print(client->control_sockfd);
+}
+
+void execute_command_change_directory_client(char *command) {
+    strtok(command, " ");
+    char *path = strtok(NULL, " ");
+
+    // Changing directories on the client-side does not require us to print server codes,
+    // that is only necessary for server responses
+    if (!is_path_directory(path)) {
+        printf("Error: Given path is not a directory\n");
+        return;
+    }
+
+    // Change the directory
+    chdir(path);
+    
+    printf("Directory changed to ");
+    print_current_directory();
+}
+
+void print_current_directory() {
+    static char buf[PATH_MAX];
+    if (getcwd(buf, sizeof(buf)) == NULL) {
+        perror("getcwd");
+        exit(EXIT_FAILURE);
+    }
+
+    printf("%s\n", buf);
+}
+
+void print_files_current_directory() {
+    static char path[PATH_MAX];
+    static char result[COMMAND_STR_MAX];
+
+    // Get the current working directory
+    if (getcwd(path, sizeof(path)) == NULL) {
+        perror("getcwd");
+        exit(EXIT_FAILURE);
+    }
+
+    // List the files in the directory
+    list_directory(path, result, sizeof(result));
+
+    // Print the result
+    printf("%s\n", result);
 }

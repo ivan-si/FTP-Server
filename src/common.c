@@ -69,6 +69,28 @@ int list_directory(char *path, char *result, int result_size) {
     return 0;
 }
 
+int is_path_directory(char *path) {
+    struct stat stat_result;
+    if (stat(path, &stat_result) == -1) {
+        return 0;
+    } else if (!S_ISDIR(stat_result.st_mode)) {
+        return 0;
+    } else {
+        return 1;
+    }
+}
+
+int is_path_file(char *path) {
+    struct stat stat_result;
+    if (stat(path, &stat_result) == -1) {
+        return 0;
+    } else if (!S_ISREG(stat_result.st_mode)) {
+        return 0;
+    } else {
+        return 1;
+    }
+}
+
 int check_first_token(const char *string, const char *token) {
     static char buf[COMMAND_STR_MAX];
     
@@ -127,7 +149,6 @@ void listen_port(int port, int *sockfd_result, int *port_result) {
             exit(EXIT_FAILURE);
         }
         *port_result = ntohs(addr.sin_port);        
-        printf("Successfully started listening on port %d\n", *port_result);
     }
 }
 
@@ -145,7 +166,7 @@ void connect_to_addr(struct sockaddr_in addr, int *result_sockfd) {
         exit(EXIT_FAILURE);
     }
 
-    // Connect socket to server
+    // Connect to address
     if (connect(sockfd, (struct sockaddr *) &addr, sizeof(addr)) == -1) {
         perror("connect");
         exit(EXIT_FAILURE);
@@ -161,7 +182,52 @@ void send_message(int sockfd, const char *message) {
     }
 }
 
-void receive_response_then_print(int sockfd) {
+void send_file(int sockfd, const char *path) {
+    static char buf[FILE_TRANSFER_BUFFER_SIZE];
+
+    // Open the file for reading in binary format (text format is covered by this)
+    FILE *file = fopen(path, "rb");
+    if (file == NULL) {
+        perror("fopen");
+        exit(EXIT_FAILURE);
+    }
+
+    size_t bytes_read;
+    while ((bytes_read = fread(buf, 1, sizeof(buf), file)) > 0) {
+        int bytes_sent = send(sockfd, buf, bytes_read, 0);
+        if (bytes_sent == -1) {
+            perror("send");
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    // Close the file
+    fclose(file);
+}
+
+void save_file(int sockfd, const char *path) {
+    static char buf[FILE_TRANSFER_BUFFER_SIZE];
+
+    // Open the file for reading in binary format (text format is covered by this)
+    FILE *file = fopen(path, "wb");
+    if (file == NULL) {
+        perror("fopen");
+        exit(EXIT_FAILURE);
+    }
+
+    size_t bytes_received;
+    while ((bytes_received = recv(sockfd, buf, FILE_TRANSFER_BUFFER_SIZE, 0)) > 0) {
+        if (fwrite(buf, 1, bytes_received, file) == 0) {
+            perror("fwrite");
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    // Close the file
+    fclose(file);
+}
+
+void receive_message_then_print(int sockfd) {
     static char buf[COMMAND_STR_MAX];
 
     // Receive response
@@ -170,7 +236,6 @@ void receive_response_then_print(int sockfd) {
         perror("recv");
         exit(EXIT_FAILURE);
     } else if (bytes_received == 0) {
-        // Server closed the connection unexpectedly
         fprintf(stderr, "Connection was closed unexpectedly.\n");
         exit(EXIT_FAILURE);
     }
@@ -182,7 +247,7 @@ void receive_response_then_print(int sockfd) {
     printf("%s\n", buf);
 }
 
-int receive_response_then_check_first_token_then_print_response_if_ok(int sockfd, const char *expected) {
+int receive_message_then_print_then_check_first_token(int sockfd, const char *expected) {
     static char buf[COMMAND_STR_MAX];
 
     int bytes_received = recv(sockfd, buf, COMMAND_STR_MAX - 1, 0);
@@ -197,13 +262,10 @@ int receive_response_then_check_first_token_then_print_response_if_ok(int sockfd
         // Null-terminate the response
         buf[bytes_received] = '\0';
 
+        // Print the response
+        printf("%s\n", buf);
+
         // Check if response starts with expected token
-        if (check_first_token(buf, expected)) {
-            printf("%s\n", buf);
-            return 1;
-        } else {
-            fprintf(stderr, "Unexpected response: %s\n", buf);
-            return 0;
-        }
+        return check_first_token(buf, expected);
     }
 }

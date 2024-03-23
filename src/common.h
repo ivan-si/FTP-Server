@@ -5,10 +5,12 @@
 #include <netinet/in.h>
 
 // TODO: Change to 21, 20
-#define SERVER_CONTROL_PORT 2100
-#define SERVER_DATA_PORT 2000
+#define SERVER_CONTROL_PORT (2100)
+#define SERVER_DATA_PORT (2000)
 
 #define COMMAND_STR_MAX (2 * PATH_MAX)
+
+#define FILE_TRANSFER_BUFFER_SIZE (1024)
 
 extern const char
     *COMMAND_USERNAME,
@@ -28,6 +30,10 @@ void create_directory_if_not_exists(char *path);
 
 int list_directory(char *path, char *result, int result_size);
 
+int is_path_directory(char *path);
+
+int is_path_file(char *path);
+
 int check_first_token(const char *string, const char *token);
 
 /**
@@ -44,8 +50,12 @@ void connect_to_addr(struct sockaddr_in addr, int *result_sockfd);
 
 void send_message(int sockfd, const char *message);
 
-void receive_response_then_print(int sockfd);
+void send_file(int sockfd, const char *path);
 
-int receive_response_then_check_first_token_then_print_response_if_ok(int sockfd, const char *expected);
+void save_file(int sockfd, const char *path);
+
+void receive_message_then_print(int sockfd);
+
+int receive_message_then_print_then_check_first_token(int sockfd, const char *expected);
 
 #endif
