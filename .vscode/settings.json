@@ -8,6 +8,7 @@
         "client.h": "c",
         "socket.h": "c",
         "limits.h": "c",
-        "stat.h": "c"
+        "stat.h": "c",
+        "select.h": "c"
     }
 }

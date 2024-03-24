@@ -15,6 +15,7 @@ int main() {
     struct server_state server;
     initialize_server_directories(&server);
     read_auth_data(&server);
+    initialize_user_storage_directories(&server);
     listen_port(SERVER_CONTROL_PORT, &(server.control_sockfd), NULL);
     monitor_control_port(&server);
 }
@@ -106,91 +107,6 @@ void handle_client_sending_data(struct server_state *server, struct server_clien
     }
 }
 
-void handle_command(struct server_state *server, struct server_client_state *client, char *command) {
-    // Handle command based on which one it is
-    if (check_first_token(command, COMMAND_USERNAME)) {
-        handle_command_username(server, client, command);
-    } else if (check_first_token(command, COMMAND_PASSWORD)) {
-        handle_command_password(server, client, command);
-    } else if (check_first_token(command, COMMAND_PORT)) {
-        handle_command_port(client, command);
-    } else if (check_first_token(command, COMMAND_STORE)) {
-        handle_command_store(client, command);
-    } else if (check_first_token(command, COMMAND_RETRIEVE)) {
-        handle_command_retrieve(client, command);
-    } else if (check_first_token(command, COMMAND_LIST)) {
-        handle_command_list(client);
-    } else if (check_first_token(command, COMMAND_CHANGE_DIRECTORY)) {
-        handle_command_change_directory(server, client, command);
-    } else if (check_first_token(command, COMMAND_PRINT_DIRECTORY)) {
-        handle_command_print_directory(server, client);
-    } else if (check_first_token(command, COMMAND_QUIT)) {
-        handle_command_quit(server, client);
-    } else {
-        // Command is not implemented
-        send_message(client->control_sockfd, "202 Command not implemented.");
-    }
-}
-
-// TODO: Handle same user logged in twice
-// TODO: Handle user logging in, disconnecting, logging in again
-
-void handle_command_username(struct server_state *server, struct server_client_state *client, char *command) {
-    if (client->state != SERVER_CLIENT_STATE_NEED_USERNAME) {
-        send_message(client->control_sockfd, "503 Bad sequence of commands.");
-        return;
-    }
-
-    // Get the username from the command
-    strtok(command, " ");
-    char *username = strtok(NULL, " ");
-    if (username == NULL) {
-        // No username provided
-        send_message(client->control_sockfd, "530 Not logged in.");
-        return;
-    }
-    
-    struct user_auth_data *auth_data = find_auth_data_by_username(server, username);
-    if (auth_data == NULL) {
-        // No user with the username was found
-        send_message(client->control_sockfd, "530 Not logged in.");
-    } else {
-        // Update client state
-        client->state = SERVER_CLIENT_STATE_NEED_PASSWORD;
-        client->auth_data = auth_data;
-
-        send_message(client->control_sockfd, "331 Username OK, need password.");
-    }
-}
-
-void handle_command_password(struct server_state *server, struct server_client_state *client, char *command) {   
-    if (client->state != SERVER_CLIENT_STATE_NEED_PASSWORD) {
-        send_message(client->control_sockfd, "503 Bad sequence of commands.");
-        return;
-    }
-
-    // Get the password from the command
-    strtok(command, " ");
-    char *password = strtok(NULL, " ");
-    if (password == NULL) {
-        // No username provided
-        send_message(client->control_sockfd, "530 Not logged in.");
-        return;
-    }
-    
-    if (strcmp(client->auth_data->password, password) == 0) {
-        // Password matches
-        client->state = SERVER_CLIENT_STATE_AUTHENTICATED;
-        initialize_current_path(server, client);
-        send_message(client->control_sockfd, "230 User logged in, proceed.");
-    } else {
-        // Password does not match
-        client->state = SERVER_CLIENT_STATE_NEED_USERNAME;
-        client->auth_data = NULL;
-        send_message(client->control_sockfd, "530 Not logged in.");
-    }
-}
-
 void add_new_client(struct server_state *server, int client_sockfd) {
     // Initialize structure
     struct server_client_state *client = malloc(sizeof(struct server_client_state));
@@ -243,7 +159,7 @@ struct server_client_state* find_client_by_control_sockfd(struct server_state *s
 void read_auth_data(struct server_state *server) {
     server->users_auth_data = NULL;
 
-    // Open the users.txt file for reading
+    // Construct the path for the the users.txt file
     static char users_txt_path[PATH_MAX * 2];
     sprintf(users_txt_path, "%s/users.txt", server->base_path);
 
@@ -254,11 +170,12 @@ void read_auth_data(struct server_state *server) {
         exit(EXIT_FAILURE);
     }
 
-    // Open the file
+    // Try to open the file
     FILE *file = fopen(users_txt_path, "r");
     if (file == NULL) {
-        perror("fopen");
-        exit(EXIT_FAILURE);
+        // The file could not be opened or is missing
+        // Fail silently
+        return;
     }
 
     // Read each line from the file and parse username and password
@@ -267,26 +184,21 @@ void read_auth_data(struct server_state *server) {
         // Remove trailing newline
         line[strcspn(line, "\n")] = '\0';
 
-        // Tokenize the line to extract username and password
+        // Extract username and password
         char *username = strtok(line, " ");
         char *password = strtok(NULL, " ");
 
-        // Skip empty lines
+        // Skip line if it is invalid or empty
         if (username == NULL || password == NULL) {
             continue;
         }
 
-        // Add the authentication data to the linked list
+        // Add the auth data
         add_auth_data(server, username, password);
     }
 
     // Close the file
     fclose(file);
-
-    // For each user, create their storage directory if it is missing
-    for (struct user_auth_data *node = server->users_auth_data; node != NULL; node = node->next) {
-        initialize_user_storage_directory(server, node);
-    }
 }
 
 void add_auth_data(struct server_state *server, char *username, char *password) {
@@ -311,12 +223,15 @@ struct user_auth_data* find_auth_data_by_username(struct server_state *server, c
     return NULL;
 }
 
-void initialize_user_storage_directory(struct server_state *server, struct user_auth_data *auth_data) {
+void initialize_user_storage_directories(struct server_state *server) {
     static char buf[PATH_MAX + 1 + AUTH_STR_MAX];
 
-    // Construct the user's base and directory, then create it if it does not exist
-    sprintf(buf, "%s/%s", server->users_storage_path, auth_data->username);
-    create_directory_if_not_exists(buf);
+    for (struct user_auth_data *auth_data = server->users_auth_data; auth_data != NULL; auth_data = auth_data->next) {
+        // Construct the path to the user's base directory
+        sprintf(buf, "%s/%s", server->users_storage_path, auth_data->username);
+        // Create the directory if it does not exist
+        create_directory_if_not_exists(buf);
+    }
 }
 
 void initialize_current_path(struct server_state *server, struct server_client_state *client) {
@@ -325,6 +240,89 @@ void initialize_current_path(struct server_state *server, struct server_client_s
     // Initialize the current path of the user to the user's base directory
     sprintf(buf, "%s/%s", server->users_storage_path, client->auth_data->username);
     strcpy(client->current_path, buf);
+}
+
+void handle_command(struct server_state *server, struct server_client_state *client, char *command) {
+    // Handle command based on which one it is
+    if (check_first_token(command, COMMAND_USERNAME)) {
+        handle_command_username(server, client, command);
+    } else if (check_first_token(command, COMMAND_PASSWORD)) {
+        handle_command_password(server, client, command);
+    } else if (check_first_token(command, COMMAND_PORT)) {
+        handle_command_port(client, command);
+    } else if (check_first_token(command, COMMAND_STORE)) {
+        handle_command_store(client, command);
+    } else if (check_first_token(command, COMMAND_RETRIEVE)) {
+        handle_command_retrieve(client, command);
+    } else if (check_first_token(command, COMMAND_LIST)) {
+        handle_command_list(client);
+    } else if (check_first_token(command, COMMAND_CHANGE_DIRECTORY)) {
+        handle_command_change_directory(server, client, command);
+    } else if (check_first_token(command, COMMAND_PRINT_DIRECTORY)) {
+        handle_command_print_directory(server, client);
+    } else if (check_first_token(command, COMMAND_QUIT)) {
+        handle_command_quit(server, client);
+    } else {
+        // Command is not implemented
+        send_message(client->control_sockfd, "202 Command not implemented.");
+    }
+}
+
+void handle_command_username(struct server_state *server, struct server_client_state *client, char *command) {
+    if (client->state != SERVER_CLIENT_STATE_NEED_USERNAME) {
+        send_message(client->control_sockfd, "503 Bad sequence of commands.");
+        return;
+    }
+
+    // Get the username from the command
+    strtok(command, " ");
+    char *username = strtok(NULL, " ");
+    if (username == NULL) {
+        // No username provided
+        send_message(client->control_sockfd, "530 Not logged in.");
+        return;
+    }
+    
+    struct user_auth_data *auth_data = find_auth_data_by_username(server, username);
+    if (auth_data == NULL) {
+        // No user with the username was found
+        send_message(client->control_sockfd, "530 Not logged in.");
+        return;
+    }
+
+    // Update client state
+    client->state = SERVER_CLIENT_STATE_NEED_PASSWORD;
+    client->auth_data = auth_data;
+
+    send_message(client->control_sockfd, "331 Username OK, need password.");
+}
+
+void handle_command_password(struct server_state *server, struct server_client_state *client, char *command) {   
+    if (client->state != SERVER_CLIENT_STATE_NEED_PASSWORD) {
+        send_message(client->control_sockfd, "503 Bad sequence of commands.");
+        return;
+    }
+
+    // Get the password from the command
+    strtok(command, " ");
+    char *password = strtok(NULL, " ");
+    if (password == NULL) {
+        // No username provided
+        send_message(client->control_sockfd, "530 Not logged in.");
+        return;
+    }
+    
+    if (strcmp(client->auth_data->password, password) == 0) {
+        // Password matches
+        client->state = SERVER_CLIENT_STATE_AUTHENTICATED;
+        initialize_current_path(server, client);
+        send_message(client->control_sockfd, "230 User logged in, proceed.");
+    } else {
+        // Password does not match
+        client->state = SERVER_CLIENT_STATE_NEED_USERNAME;
+        client->auth_data = NULL;
+        send_message(client->control_sockfd, "530 Not logged in.");
+    }
 }
 
 void handle_command_port(struct server_client_state *client, char *command) {
@@ -395,7 +393,7 @@ void handle_command_store(struct server_client_state *client, char *command) {
 
     // Connect
     int data_sockfd;
-    connect_to_addr(client->data_addr, &data_sockfd);
+    connect_to_addr(client->data_addr, &data_sockfd, NULL);
 
     // Receive the file and save it at the client directory
     sprintf(buf, "%s/%s", client->current_path, filename);
@@ -463,7 +461,7 @@ void handle_command_retrieve(struct server_client_state *client, char *command) 
 
     // Connect
     int data_sockfd;
-    connect_to_addr(client->data_addr, &data_sockfd);
+    connect_to_addr(client->data_addr, &data_sockfd, NULL);
 
     // Send the file
     send_file(data_sockfd, buf);
@@ -510,7 +508,7 @@ void handle_command_list(struct server_client_state *client) {
 
     // Connect
     int data_sockfd;
-    connect_to_addr(client->data_addr, &data_sockfd);
+    connect_to_addr(client->data_addr, &data_sockfd, NULL);
 
     // Send the data
     send_message(data_sockfd, buf);

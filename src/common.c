@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
@@ -37,13 +38,20 @@ void create_directory_if_not_exists(char *path) {
 }
 
 int list_directory(char *path, char *result, int result_size) {
-    // Credits: https://stackoverflow.com/questions/4204666/how-to-list-files-in-a-directory-in-a-c-program
+    if (result_size == 0) {
+        fprintf(stderr, "result_size must be positive\n");
+        exit(EXIT_FAILURE);
+    }
+
     // Open the current directory
     DIR *dir = opendir(path);
     if (dir == NULL) {
         perror("opendir");
         return -1;
     }
+
+    // Clear the buffer
+    result[0] = '\0';
 
     // Read directory entries
     struct dirent *entry;
@@ -60,7 +68,7 @@ int list_directory(char *path, char *result, int result_size) {
         }
 
         // Add entry name to result
-        p += sprintf(result + p, "%s%s", p == 0 ? "" : "\n", entry->d_name);
+        p += sprintf(result + p, "%s%s", p == 0 ? "" : "\n", entry->d_name); 
     }
 
     // Close the directory
@@ -97,16 +105,69 @@ int check_first_token(const char *string, const char *token) {
     size_t string_length = strlen(string);
     size_t token_length = strlen(token);
     if (string_length < token_length) {
+        // The string cannot contain the token
         return 0;
     } else if (string_length == token_length) {
+        // They are the same length, so compare them whole
         return strcmp(string, token) == 0;
     }
     
+    // Compare (string) with (token with a space at the end)
     sprintf(buf, "%s ", token);
     return strncmp(string, buf, token_length + 1) == 0;
 }
 
-void listen_port(int port, int *sockfd_result, int *port_result) {
+int try_bind(int port) {
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd == -1) {
+        perror("socket");
+        exit(EXIT_FAILURE);
+    }
+
+    // Create an address structure for the local host
+    struct sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+    // Try to bind to the port
+    int result = bind(sockfd, (struct sockaddr *) &addr, sizeof(addr));
+    
+    // Close the socket
+    close(sockfd);
+
+    // If bind returned 0, it was successful and the port was free
+    return result == 0;
+}
+
+int get_next_free_port(int port) {
+    int start_port = port;
+
+    // Start searching from the initial port + 1 until 65535
+    port++;
+    while (port < 65536) {
+        if (try_bind(port)) {
+            return port;
+        } else {
+            port++;
+        }
+    }
+
+    // Wrap back down to 1024 and search until the initial port - 1
+    port = 1024;
+    while (port < start_port) {
+        if (try_bind(port)) {
+            return port;
+        } else {
+            port++;
+        }
+    }
+
+    // No free port was found
+    return -1;
+}
+
+int listen_port(int port, int *result_sockfd, int *result_port) {
     // Get socket file descriptor
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd == -1) {
@@ -129,30 +190,31 @@ void listen_port(int port, int *sockfd_result, int *port_result) {
     
     // Bind socket to port
     if (bind(sockfd, (struct sockaddr *) &addr, sizeof(addr)) == -1) {
-        perror("bind");
-        exit(EXIT_FAILURE);
+        return -1;
     }
 
     // Listen for connections on port
-    if (listen(sockfd, 0) == -1) {
+    if (listen(sockfd, LISTEN_BACKLOG) == -1) {
         perror("listen");
         exit(EXIT_FAILURE);
     }
 
-    // Store socket and port (if asked for)
-    *sockfd_result = sockfd;
+    // Store socket file descriptor and port (if asked for)
+    *result_sockfd = sockfd;
 
-    if (port_result) {
+    if (result_port) {
         socklen_t addr_len = sizeof(addr);
         if (getsockname(sockfd, (struct sockaddr *) &addr, &addr_len) == -1) {
             perror("getsockname");
             exit(EXIT_FAILURE);
         }
-        *port_result = ntohs(addr.sin_port);        
+        *result_port = ntohs(addr.sin_port);
     }
+
+    return 0;
 }
 
-void connect_to_addr(struct sockaddr_in addr, int *result_sockfd) {
+void connect_to_addr(struct sockaddr_in addr, int *result_sockfd, int *result_port) {
     // Get socket file descriptor
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd == -1) {
@@ -172,10 +234,21 @@ void connect_to_addr(struct sockaddr_in addr, int *result_sockfd) {
         exit(EXIT_FAILURE);
     }
 
+    // Store socket file descriptor and port (if asked for)
     *result_sockfd = sockfd;
+
+    if (result_port) {
+        socklen_t addr_len = sizeof(addr);
+        if (getsockname(sockfd, (struct sockaddr *) &addr, &addr_len) == -1) {
+            perror("getsockname");
+            exit(EXIT_FAILURE);
+        }
+        *result_port = ntohs(addr.sin_port);
+    }
 }
 
 void send_message(int sockfd, const char *message) {
+    // Send the message through the socket
     if (send(sockfd, message, strlen(message), 0) == -1) {
         perror("send");
         exit(EXIT_FAILURE);
@@ -193,7 +266,10 @@ void send_file(int sockfd, const char *path) {
     }
 
     size_t bytes_read;
+
+    // Read bytes from the file into the buffer
     while ((bytes_read = fread(buf, 1, sizeof(buf), file)) > 0) {
+        // Send bytes through the socket
         int bytes_sent = send(sockfd, buf, bytes_read, 0);
         if (bytes_sent == -1) {
             perror("send");
@@ -216,7 +292,10 @@ void save_file(int sockfd, const char *path) {
     }
 
     size_t bytes_received;
+
+    // Receive bytes through the socket into the buffer
     while ((bytes_received = recv(sockfd, buf, FILE_TRANSFER_BUFFER_SIZE, 0)) > 0) {
+        // Write the bytes into the file
         if (fwrite(buf, 1, bytes_received, file) == 0) {
             perror("fwrite");
             exit(EXIT_FAILURE);
@@ -235,9 +314,6 @@ void receive_message_then_print(int sockfd) {
     if (bytes_received == -1) {
         perror("recv");
         exit(EXIT_FAILURE);
-    } else if (bytes_received == 0) {
-        fprintf(stderr, "Connection was closed unexpectedly.\n");
-        exit(EXIT_FAILURE);
     }
 
     // Null-terminate the response
@@ -254,18 +330,14 @@ int receive_message_then_print_then_check_first_token(int sockfd, const char *ex
     if (bytes_received == -1) {
         perror("recv");
         exit(EXIT_FAILURE);
-    } else if (bytes_received == 0) {
-        // Server closed the connection unexpectedly
-        fprintf(stderr, "Connection was closed unexpectedly.\n");
-        exit(EXIT_FAILURE);
-    } else {
-        // Null-terminate the response
-        buf[bytes_received] = '\0';
-
-        // Print the response
-        printf("%s\n", buf);
-
-        // Check if response starts with expected token
-        return check_first_token(buf, expected);
     }
+    
+    // Null-terminate the response
+    buf[bytes_received] = '\0';
+
+    // Print the response
+    printf("%s\n", buf);
+
+    // Check if response starts with expected token
+    return check_first_token(buf, expected);
 }

@@ -18,9 +18,9 @@ int main() {
     struct client_state client;
     client.control_sockfd = -1;
     client.data_listen_sockfd = -1;
+    client.data_listen_port = -1;
     client.data_sockfd = -1;
-    client.data_port = -1;
-
+    
     // Connect to the server
     struct sockaddr_in server_addr;
     memset(&server_addr, 0, sizeof(server_addr));
@@ -28,9 +28,10 @@ int main() {
     server_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
     server_addr.sin_port = htons(SERVER_CONTROL_PORT);
 
-    connect_to_addr(server_addr, &(client.control_sockfd));
+    connect_to_addr(server_addr, &(client.control_sockfd), &(client.control_port));
     
     if (!receive_message_then_print_then_check_first_token(client.control_sockfd, "220")) {
+        // Server didn't reply with proper welcome message
         exit(EXIT_FAILURE);
     }
 
@@ -57,6 +58,7 @@ void get_commands(struct client_state *client) {
         // Remove trailing newline
         command[command_length--] = '\0';
         
+        // Handle or execute the entered command
         if (check_first_token(command, COMMAND_LIST_CLIENT)) {
             print_files_current_directory();
         } else if (check_first_token(command, COMMAND_CHANGE_DIRECTORY_CLIENT)) {
@@ -70,14 +72,12 @@ void get_commands(struct client_state *client) {
         } else if (check_first_token(command, COMMAND_RETRIEVE)) {
             execute_command_retrieve(client, command);
         } else {
-            // This includes PORT (which effectively does nothing since it is
-            // sent again before LIST, STORE, or RETR)
-
-            // TODO: Handle "PORT" being entered with nothing else hanging the program
-            
+            // Whichever command it is, it is handled by sending it to the server
+            // and just printing the response
             send_message(client->control_sockfd, command);
             receive_message_then_print(client->control_sockfd);
 
+            // If the command is QUIT, exit the loop
             if (check_first_token(command, COMMAND_QUIT)) {
                 break;
             }
@@ -85,7 +85,34 @@ void get_commands(struct client_state *client) {
     }
 }
 
-int send_data_port(struct client_state *client) {
+void listen_on_next_free_port(struct client_state *client) {
+    // We start searching for data listen port from the control port
+    if (client->data_listen_port == -1) {
+        client->data_listen_port = client->control_port;
+    }
+
+    // Find a data port to connect to
+    while (1) {
+        int next_free_port = get_next_free_port(client->data_listen_port);
+        if (next_free_port == -1) {
+            fprintf(stderr, "Error: Could not find any free port\n");
+            exit(EXIT_FAILURE);
+        }
+
+        client->data_listen_port = next_free_port;
+        
+        // Try to listen on the port
+        if (listen_port(next_free_port, &(client->data_listen_sockfd), NULL) == -1) {
+            // The port was taken by the time we could use it
+            continue;
+        }
+
+        // We succeeded in listening
+        break;
+    }
+}
+
+int send_data_listen_port(struct client_state *client) {
     static char buf[COMMAND_STR_MAX];
 
     // Add command to buffer
@@ -97,7 +124,7 @@ int send_data_port(struct client_state *client) {
         p += sprintf(buf + p, "%d,", x);
     }
     // Add port to buffer (in host order)
-    int port = client->data_port;
+    int port = client->data_listen_port;
     for (int i = 1; i >= 0; i--) {
         int x = (port >> (8 * i)) & 0xff;
         p += sprintf(buf + p, "%d", x);
@@ -107,6 +134,7 @@ int send_data_port(struct client_state *client) {
     // Send to server
     send_message(client->control_sockfd, buf);
 
+    // If the server returns a message with code 200, return 0 (success). Otherwise return -1
     return receive_message_then_print_then_check_first_token(client->control_sockfd, "200")
         ? 0
         : -1;
@@ -129,13 +157,12 @@ void initiate_data_transfer(struct client_state *client) {
 void end_data_transfer(struct client_state *client) {
     close(client->data_sockfd);
     client->data_sockfd = -1;
-    client->data_port = -1;
 }
 
 void execute_command_list(struct client_state *client) {
     // Start listening on some port for data, send the port
-    listen_port(0, &(client->data_listen_sockfd), &(client->data_port));
-    if (send_data_port(client) == -1) {
+    listen_on_next_free_port(client);
+    if (send_data_listen_port(client) == -1) {
         return;
     }
     
@@ -145,17 +172,17 @@ void execute_command_list(struct client_state *client) {
         return;
     }
 
+    // Initiate the data connection, wait for the server to connect,
+    // receive and print the list of files, then close the connection
     initiate_data_transfer(client);
-    
-    // Receive list of files
     receive_message_then_print(client->data_sockfd);
-
     end_data_transfer(client);
 
     // Stop listening for new connections
     close(client->data_listen_sockfd);
     client->data_listen_sockfd = -1;
 
+    // Receive and print (hopefully) success message
     receive_message_then_print(client->control_sockfd);
 }
 
@@ -176,8 +203,8 @@ void execute_command_store(struct client_state *client, char *command) {
     sprintf(buf, "%s %s", COMMAND_STORE, filename);
 
     // Start listening on some port for data, send the port
-    listen_port(0, &(client->data_listen_sockfd), &(client->data_port));
-    if (send_data_port(client) == -1) {
+    listen_on_next_free_port(client);
+    if (send_data_listen_port(client) == -1) {
         return;
     }
 
@@ -196,6 +223,7 @@ void execute_command_store(struct client_state *client, char *command) {
     close(client->data_listen_sockfd);
     client->data_listen_sockfd = -1;
     
+    // Receive and print (hopefully) success message
     receive_message_then_print(client->control_sockfd);
 }
 
@@ -207,15 +235,15 @@ void execute_command_retrieve(struct client_state *client, char *command) {
     char *filename = strtok(NULL, " ");
 
     // Ensure only a file is being asked for (no directory changing or relative paths)
-    char *last_slash = strrchr(filename, '/');
-    if (last_slash != NULL) {
-        printf("Error: Must provide only a filename\n");
-        return;
-    }
+    // char *last_slash = strrchr(filename, '/');
+    // if (last_slash != NULL) {
+    //     printf("Error: Must provide only a filename\n");
+    //     return;
+    // }
 
     // Start listening on some port for data, send the port
-    listen_port(0, &(client->data_listen_sockfd), &(client->data_port));
-    if (send_data_port(client) == -1) {
+    listen_on_next_free_port(client);
+    if (send_data_listen_port(client) == -1) {
         return;
     }
 
@@ -235,6 +263,7 @@ void execute_command_retrieve(struct client_state *client, char *command) {
     close(client->data_listen_sockfd);
     client->data_listen_sockfd = -1;
     
+    // Receive and print (hopefully) success message
     receive_message_then_print(client->control_sockfd);
 }
 
@@ -257,13 +286,15 @@ void execute_command_change_directory_client(char *command) {
 }
 
 void print_current_directory() {
-    static char buf[PATH_MAX];
-    if (getcwd(buf, sizeof(buf)) == NULL) {
+    static char path[PATH_MAX];
+    
+    // Get the current working directory
+    if (getcwd(path, sizeof(path)) == NULL) {
         perror("getcwd");
         exit(EXIT_FAILURE);
     }
 
-    printf("%s\n", buf);
+    printf("%s\n", path);
 }
 
 void print_files_current_directory() {
